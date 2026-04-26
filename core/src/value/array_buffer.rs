@@ -90,6 +90,66 @@ impl<'js> ArrayBuffer<'js> {
         })))
     }
 
+    /// Create an `ArrayBuffer` backed by an external buffer.
+    ///
+    /// The caller retains ownership of `ptr`; `drop_fn` (if given) is invoked
+    /// with `opaque` and `ptr` when the buffer is collected. If construction
+    /// fails, `drop_fn` is invoked synchronously so ownership is released
+    /// exactly once.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to `len` bytes of valid memory for the entire lifetime
+    /// of the returned buffer and any views of it, and `drop_fn` must
+    /// correctly release that memory.
+    pub unsafe fn from_raw_parts(
+        ctx: Ctx<'js>,
+        ptr: *mut u8,
+        len: usize,
+        drop_fn: qjs::JSFreeArrayBufferDataFunc,
+        opaque: *mut c_void,
+    ) -> Result<Self> {
+        unsafe { Self::from_raw_parts_inner(ctx, ptr, len, drop_fn, opaque, false) }
+    }
+
+    /// Create a `SharedArrayBuffer` backed by an external buffer.
+    ///
+    /// Same semantics as [`from_raw_parts`] but produces a JS `SharedArrayBuffer`,
+    /// which supports `Atomics` and can be shared across workers.
+    ///
+    /// # Safety
+    ///
+    /// See [`from_raw_parts`].
+    pub unsafe fn from_raw_parts_shared(
+        ctx: Ctx<'js>,
+        ptr: *mut u8,
+        len: usize,
+        drop_fn: qjs::JSFreeArrayBufferDataFunc,
+        opaque: *mut c_void,
+    ) -> Result<Self> {
+        unsafe { Self::from_raw_parts_inner(ctx, ptr, len, drop_fn, opaque, true) }
+    }
+
+    unsafe fn from_raw_parts_inner(
+        ctx: Ctx<'js>,
+        ptr: *mut u8,
+        len: usize,
+        drop_fn: qjs::JSFreeArrayBufferDataFunc,
+        opaque: *mut c_void,
+        is_shared: bool,
+    ) -> Result<Self> {
+        Ok(Self(Object(unsafe {
+            let val =
+                qjs::JS_NewArrayBuffer(ctx.as_ptr(), ptr, len as _, drop_fn, opaque, is_shared);
+            ctx.handle_exception(val).inspect_err(|_| {
+                if let Some(f) = drop_fn {
+                    f(qjs::JS_GetRuntime(ctx.as_ptr()), opaque, ptr as *mut c_void);
+                }
+            })?;
+            Value::from_js_value(ctx, val)
+        })))
+    }
+
     /// Get the length of the array buffer in bytes.
     pub fn len(&self) -> usize {
         Self::get_raw(&self.0).expect("Not an ArrayBuffer").len
@@ -346,5 +406,129 @@ mod test {
 
             assert_eq!(val.as_bytes().unwrap(), &res)
         });
+    }
+
+    #[test]
+    fn from_raw_parts_external_buffer() {
+        use core::ffi::c_void;
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+
+        extern "C" fn drop_fn(
+            _rt: *mut crate::qjs::JSRuntime,
+            _opaque: *mut c_void,
+            ptr: *mut c_void,
+        ) {
+            unsafe {
+                drop(Box::from_raw(ptr as *mut [u8; 4]));
+            }
+            DROPPED.store(true, Ordering::SeqCst);
+        }
+
+        let rt = crate::Runtime::new().unwrap();
+        let c = crate::Context::full(&rt).unwrap();
+        c.with(|ctx| {
+            let buf = Box::into_raw(Box::new([1u8, 2, 3, 4]));
+            let ab = unsafe {
+                ArrayBuffer::from_raw_parts(
+                    ctx.clone(),
+                    buf as *mut u8,
+                    4,
+                    Some(drop_fn),
+                    core::ptr::null_mut(),
+                )
+                .unwrap()
+            };
+            assert_eq!(ab.len(), 4);
+            assert_eq!(ab.as_bytes().unwrap(), &[1, 2, 3, 4]);
+        });
+        rt.run_gc();
+        assert!(DROPPED.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn from_raw_parts_error_invokes_drop_fn() {
+        use core::ffi::c_void;
+        use core::sync::atomic::{AtomicBool, Ordering};
+
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+
+        extern "C" fn drop_fn(
+            _rt: *mut crate::qjs::JSRuntime,
+            _opaque: *mut c_void,
+            ptr: *mut c_void,
+        ) {
+            unsafe {
+                drop(Box::from_raw(ptr as *mut [u8; 4]));
+            }
+            DROPPED.store(true, Ordering::SeqCst);
+        }
+
+        let rt = crate::Runtime::new().unwrap();
+        let c = crate::Context::full(&rt).unwrap();
+        c.with(|ctx| {
+            let buf = Box::into_raw(Box::new([1u8, 2, 3, 4]));
+            let err = unsafe {
+                ArrayBuffer::from_raw_parts(
+                    ctx.clone(),
+                    buf as *mut u8,
+                    i64::MAX as usize,
+                    Some(drop_fn),
+                    core::ptr::null_mut(),
+                )
+            };
+            assert!(err.is_err());
+        });
+        assert!(DROPPED.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn from_raw_parts_shared_arc_slices() {
+        use alloc::sync::Arc;
+        use core::ffi::c_void;
+
+        extern "C" fn drop_arc(
+            _rt: *mut crate::qjs::JSRuntime,
+            opaque: *mut c_void,
+            _ptr: *mut c_void,
+        ) {
+            unsafe {
+                drop(Box::from_raw(opaque as *mut Arc<Vec<u8>>));
+            }
+        }
+
+        let buf: Arc<Vec<u8>> = Arc::new((0u8..16).collect());
+        let weak = Arc::downgrade(&buf);
+
+        let rt = crate::Runtime::new().unwrap();
+        let c = crate::Context::full(&rt).unwrap();
+        c.with(|ctx| {
+            let mk = |offset: usize, len: usize| -> ArrayBuffer<'_> {
+                let clone = buf.clone();
+                let ptr = unsafe { clone.as_ptr().add(offset) } as *mut u8;
+                let opaque = Box::into_raw(Box::new(clone)) as *mut c_void;
+                unsafe {
+                    ArrayBuffer::from_raw_parts(ctx.clone(), ptr, len, Some(drop_arc), opaque)
+                        .unwrap()
+                }
+            };
+            let full = mk(0, 16);
+            let head = mk(0, 4);
+            let tail = mk(12, 4);
+            let middle = mk(4, 8);
+
+            assert_eq!(full.as_bytes().unwrap(), (0u8..16).collect::<Vec<_>>());
+            assert_eq!(head.as_bytes().unwrap(), &[0, 1, 2, 3]);
+            assert_eq!(tail.as_bytes().unwrap(), &[12, 13, 14, 15]);
+            assert_eq!(middle.as_bytes().unwrap(), (4u8..12).collect::<Vec<_>>());
+            assert_eq!(Arc::strong_count(&buf), 5);
+        });
+
+        drop(buf);
+        rt.run_gc();
+        drop(c);
+        drop(rt);
+        assert!(weak.upgrade().is_none());
     }
 }
