@@ -329,6 +329,9 @@ impl<'js, T> IntoJs<'js> for TypedArray<'js, T> {
 
 impl<'js> Object<'js> {
     pub fn is_typed_array<T: TypedArrayItem>(&self) -> bool {
+        #[cfg(feature = "quickjs-og")]
+        let array_type = unsafe { qjs::JS_GetTypedArrayType(self.ctx.as_ptr(), self.value) };
+        #[cfg(not(feature = "quickjs-og"))]
         let array_type = unsafe { qjs::JS_GetTypedArrayType(self.value) };
         if array_type < 0 {
             return false;

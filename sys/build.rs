@@ -118,34 +118,38 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=CARGO_CFG_SANITIZE");
 
-    let src_dir = Path::new("quickjs");
+    println!("cargo:rerun-if-changed=compat_original.c");
+    println!("cargo:rerun-if-changed=compat_original.h");
+    println!("cargo:rerun-if-changed=quickjs.bind.h");
+
+    let flavor = Flavor::resolve();
+    let src_dir = flavor.src_dir;
 
     let out_dir = env::var("OUT_DIR").expect("No OUT_DIR env var is set by cargo");
     let out_dir = Path::new(&out_dir);
 
-    let header_files = [
-        "builtin-array-fromasync.h",
-        "builtin-iterator-zip-keyed.h",
-        "builtin-iterator-zip.h",
-        "cutils.h",
-        "dtoa.h",
-        "libregexp-opcode.h",
-        "libregexp.h",
-        "libunicode-table.h",
-        "libunicode.h",
-        "list.h",
-        "quickjs-atom.h",
-        "quickjs-opcode.h",
-        "quickjs-c-atomics.h",
-        "quickjs.h",
-    ];
+    let header_files = flavor.headers;
+    let source_files = flavor.sources;
 
-    let source_files = ["libregexp.c", "libunicode.c", "quickjs.c", "dtoa.c"];
+    // The original QuickJS expects `CONFIG_VERSION` to be defined by the build
+    // system from its `VERSION` file (quickjs-ng defines its version in a
+    // header, so this is only needed for the `quickjs-og` flavor).
+    let config_version = if flavor.original {
+        let version = fs::read_to_string(src_dir.join("VERSION"))
+            .expect("Unable to read quickjs-original VERSION file");
+        Some(format!("\"{}\"", version.trim()))
+    } else {
+        None
+    };
 
     let mut defines: Vec<(String, Option<&str>)> = vec![("_GNU_SOURCE".into(), None)];
 
     #[cfg(feature = "disable-assertions")]
     defines.push(("NDEBUG".into(), None));
+
+    if let Some(config_version) = config_version.as_deref() {
+        defines.push(("CONFIG_VERSION".into(), Some(config_version)));
+    }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap();
@@ -208,6 +212,22 @@ fn main() {
     }
     fs::copy("quickjs.bind.h", out_dir.join("quickjs.bind.h")).expect("Unable to copy source");
 
+    // For the original flavor, compile a small compatibility shim that
+    // re-exports quickjs-ng-style helpers which the original only provides as
+    // `static inline` (and therefore aren't picked up by bindgen). The shim's
+    // declarations are appended to the bindgen header so Rust gets bindings.
+    if flavor.original {
+        fs::copy("compat_original.c", out_dir.join("compat_original.c"))
+            .expect("Unable to copy compat_original.c");
+        fs::copy("compat_original.h", out_dir.join("compat_original.h"))
+            .expect("Unable to copy compat_original.h");
+
+        let bind_header = out_dir.join("quickjs.bind.h");
+        let mut contents = fs::read_to_string(&bind_header).unwrap();
+        contents.push_str("\n#include \"compat_original.h\"\n");
+        fs::write(&bind_header, contents).unwrap();
+    }
+
     if target_os == "wasi" && !matches!(env::var("RQUICKJS_SYS_NO_WASI_SDK").as_deref(), Ok("1")) {
         let wasi_sdk_path = get_wasi_sdk_path();
         if !wasi_sdk_path.try_exists().unwrap() {
@@ -232,17 +252,104 @@ fn main() {
         out_dir.join("quickjs.bind.h"),
         &defines,
         bindgen_cflags,
+        flavor.original,
     );
 
     for (name, value) in &defines {
         builder.define(name, *value);
     }
 
-    for src in &source_files {
+    for src in source_files {
         builder.file(out_dir.join(src));
     }
 
+    if flavor.original {
+        builder.file(out_dir.join("compat_original.c"));
+    }
+
     builder.compile("libquickjs.a");
+}
+
+/// Returns the source directory of the selected QuickJS flavor.
+///
+/// The `quickjs-ng` and `quickjs-og` features are mutually exclusive;
+/// exactly one must be enabled.
+/// Everything that differs between the two QuickJS C flavors, resolved once.
+struct Flavor {
+    /// Whether this is the original (Bellard) flavor. `false` means quickjs-ng.
+    original: bool,
+    /// Submodule directory holding the C sources.
+    src_dir: &'static Path,
+    /// Header files to copy into `OUT_DIR`.
+    headers: &'static [&'static str],
+    /// Source files to compile.
+    sources: &'static [&'static str],
+}
+
+impl Flavor {
+    /// Resolve the selected flavor from cargo features.
+    ///
+    /// The invalid "both" / "neither" cases are reported to the user via
+    /// `compile_error!` in lib.rs (a friendlier diagnostic than a build-script
+    /// panic); if both are somehow enabled we default to quickjs-ng so the
+    /// build proceeds far enough to surface that error.
+    fn resolve() -> Self {
+        const NG_HEADERS: &[&str] = &[
+            "builtin-array-fromasync.h",
+            "builtin-iterator-zip-keyed.h",
+            "builtin-iterator-zip.h",
+            "cutils.h",
+            "dtoa.h",
+            "libregexp-opcode.h",
+            "libregexp.h",
+            "libunicode-table.h",
+            "libunicode.h",
+            "list.h",
+            "quickjs-atom.h",
+            "quickjs-opcode.h",
+            "quickjs-c-atomics.h",
+            "quickjs.h",
+        ];
+        const NG_SOURCES: &[&str] = &["libregexp.c", "libunicode.c", "quickjs.c", "dtoa.c"];
+
+        // The original lacks the `builtin-*` and `quickjs-c-atomics.h` headers
+        // and ships `cutils.c` as a separate translation unit.
+        const ORIG_HEADERS: &[&str] = &[
+            "cutils.h",
+            "dtoa.h",
+            "libregexp-opcode.h",
+            "libregexp.h",
+            "libunicode-table.h",
+            "libunicode.h",
+            "list.h",
+            "quickjs-atom.h",
+            "quickjs-opcode.h",
+            "quickjs.h",
+        ];
+        const ORIG_SOURCES: &[&str] = &[
+            "cutils.c",
+            "libregexp.c",
+            "libunicode.c",
+            "quickjs.c",
+            "dtoa.c",
+        ];
+
+        if cfg!(feature = "quickjs-og") && !cfg!(feature = "quickjs-ng") {
+            Flavor {
+                original: true,
+                src_dir: Path::new("quickjs-original"),
+                headers: ORIG_HEADERS,
+                sources: ORIG_SOURCES,
+            }
+        } else {
+            Flavor {
+                original: false,
+                src_dir: Path::new("quickjs"),
+                headers: NG_HEADERS,
+                sources: NG_SOURCES,
+            }
+        }
+    }
 }
 
 fn feature_to_cargo(name: impl AsRef<str>) -> String {
@@ -254,8 +361,13 @@ fn feature_to_define(name: impl AsRef<str>) -> String {
 }
 
 #[cfg(not(feature = "bindgen"))]
-fn bindgen<'a, D, H, X, K, V>(out_dir: D, _header_file: H, _defines: X, _add_cflags: Vec<String>)
-where
+fn bindgen<'a, D, H, X, K, V>(
+    out_dir: D,
+    _header_file: H,
+    _defines: X,
+    _add_cflags: Vec<String>,
+    _original: bool,
+) where
     D: AsRef<Path>,
     H: AsRef<Path>,
     X: IntoIterator<Item = &'a (K, Option<V>)>,
@@ -293,8 +405,13 @@ where
 }
 
 #[cfg(feature = "bindgen")]
-fn bindgen<'a, D, H, X, K, V>(out_dir: D, header_file: H, defines: X, add_cflags: Vec<String>)
-where
+fn bindgen<'a, D, H, X, K, V>(
+    out_dir: D,
+    header_file: H,
+    defines: X,
+    add_cflags: Vec<String>,
+    original: bool,
+) where
     D: AsRef<Path>,
     H: AsRef<Path>,
     X: IntoIterator<Item = &'a (K, Option<V>)>,
@@ -328,10 +445,30 @@ where
         .allowlist_function("js.*")
         .allowlist_function("JS.*")
         .allowlist_function("__JS.*")
+        .allowlist_function("rquickjs_compat_.*")
         .allowlist_var("JS.*")
         .opaque_type("FILE")
         .blocklist_type("FILE")
         .blocklist_function("JS_DumpMemoryUsage");
+
+    // For the original flavor, block the declarations whose signatures diverge
+    // from quickjs-ng; the compat shim re-exports normalized versions and the
+    // sys crate aliases them back to the quickjs-ng names.
+    if original {
+        for f in [
+            "JS_GetProperty",
+            "JS_SetProperty",
+            "JS_IsArray",
+            "JS_IsError",
+            "JS_IsFunction",
+            "JS_IsConstructor",
+            "JS_NewClassID",
+            "JS_HasException",
+            "JS_SetConstructorBit",
+        ] {
+            builder = builder.blocklist_function(f);
+        }
+    }
 
     if env::var("CARGO_CFG_TARGET_OS").unwrap() == "wasi" {
         builder = builder.clang_arg("-fvisibility=default");
