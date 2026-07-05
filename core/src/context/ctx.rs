@@ -572,7 +572,10 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "foo is not defined")]
+    // Both flavors throw a ReferenceError; the original phrases it as
+    // `'foo' is not defined` and quickjs-ng as `foo is not defined`, so we
+    // match on the common substring.
+    #[should_panic(expected = "is not defined")]
     fn eval_with_sloppy_code() {
         use crate::{CatchResultExt, Context, Runtime};
 
@@ -624,7 +627,9 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "foo is not defined")]
+    // Both flavors throw a ReferenceError; match on the common substring (see
+    // `eval_with_sloppy_code`).
+    #[should_panic(expected = "is not defined")]
     fn eval_with_options_strict_sloppy_code() {
         use crate::{context::EvalOptions, CatchResultExt, Context, Runtime};
 

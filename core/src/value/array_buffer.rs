@@ -103,13 +103,17 @@ impl<'js> ArrayBuffer<'js> {
         }
 
         Ok(Self(Object(unsafe {
+            #[cfg(feature = "quickjs-og")]
+            let shared_flag = false as ::core::ffi::c_int;
+            #[cfg(not(feature = "quickjs-og"))]
+            let shared_flag = false;
             let val = qjs::JS_NewArrayBuffer(
                 ctx.as_ptr(),
                 ptr as _,
                 size as _,
                 Some(drop_raw::<T>),
                 capacity as _,
-                false,
+                shared_flag,
             );
             ctx.handle_exception(val).inspect_err(|_| {
                 // don't forget to free data when error occurred
@@ -207,13 +211,17 @@ impl<'js> ArrayBuffer<'js> {
         let opaque = Box::into_raw(Box::new(drop_fn)) as *mut c_void;
 
         Ok(Self(Object(unsafe {
+            #[cfg(feature = "quickjs-og")]
+            let shared_flag = is_shared as ::core::ffi::c_int;
+            #[cfg(not(feature = "quickjs-og"))]
+            let shared_flag = is_shared;
             let val = qjs::JS_NewArrayBuffer(
                 ctx.as_ptr(),
                 ptr,
                 len as _,
                 Some(shim::<F>),
                 opaque,
-                is_shared,
+                shared_flag,
             );
             if let Err(e) = ctx.handle_exception(val) {
                 shim::<F>(qjs::JS_GetRuntime(ctx.as_ptr()), opaque, ptr as *mut c_void);
@@ -552,6 +560,10 @@ mod test {
     }
 
     #[test]
+    #[cfg_attr(
+        feature = "quickjs-og",
+        ignore = "immutable ArrayBuffers are a quickjs-ng feature"
+    )]
     fn from_source_immutable_arc_slices() {
         struct ArcSlice {
             arc: Arc<Vec<u8>>,

@@ -9,3 +9,8 @@ publish = false
 path = "../.."
 default-features = false
 features = ["rust-alloc", "loader"]
+
+[features]
+default = ["quickjs-ng"]
+quickjs-ng = ["rquickjs/quickjs-ng"]
+quickjs-og = ["rquickjs/quickjs-og", "rquickjs/bindgen"]

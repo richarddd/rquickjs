@@ -27,10 +27,16 @@ phf_shared = { version = "0.14", optional = true }
 phf_generator = { version = "0.14", optional = true }
 
 [dev-dependencies]
-rquickjs = { path = "../", features = ["macro", "futures", "phf"] }
+rquickjs = { path = "../", default-features = false, features = ["macro", "futures", "phf"] }
 difference = "2"
 
 
 [features]
+default = ["quickjs-ng"]
 phf = ["phf_shared", "phf_generator"]
 bindgen = ["rquickjs-core/bindgen"]
+
+# Select which QuickJS C flavor to build against (mutually exclusive). Forwarded
+# to the `rquickjs-core` dependency and the `rquickjs` dev-dependency.
+quickjs-ng = ["rquickjs-core/quickjs-ng", "rquickjs/quickjs-ng"]
+quickjs-og = ["rquickjs-core/quickjs-og", "rquickjs/quickjs-og"]

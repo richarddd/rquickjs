@@ -39,7 +39,7 @@ rquickjs-macro = { workspace = true, optional = true }
 
 
 [features]
-default = ["std"]
+default = ["std", "quickjs-ng"]
 
 # Almost all features excluding "parallel" and support for async runtimes
 full = [
@@ -64,6 +64,12 @@ full-async-wasi = ["full-wasi", "futures"]
 
 # Enable use of the rust standard library
 std = ["rquickjs-core/std"]
+
+# Select which QuickJS C flavor to build against (mutually exclusive).
+# `quickjs-ng` (default) builds the quickjs-ng fork; `quickjs-og` builds
+# Fabrice Bellard's original QuickJS. The latter requires the `bindgen` feature.
+quickjs-ng = ["rquickjs-core/quickjs-ng"]
+quickjs-og = ["rquickjs-core/quickjs-og"]
 
 # Chrono support.
 chrono = ["rquickjs-core/chrono"]

@@ -69,12 +69,27 @@ impl AllocatorHolder {
     where
         A: Allocator,
     {
-        qjs::JSMallocFunctions {
-            js_calloc: Some(Self::calloc::<A>),
-            js_malloc: Some(Self::malloc::<A>),
-            js_free: Some(Self::free::<A>),
-            js_realloc: Some(Self::realloc::<A>),
-            js_malloc_usable_size: Some(Self::malloc_usable_size::<A>),
+        #[cfg(not(feature = "quickjs-og"))]
+        {
+            qjs::JSMallocFunctions {
+                js_calloc: Some(Self::calloc::<A>),
+                js_malloc: Some(Self::malloc::<A>),
+                js_free: Some(Self::free::<A>),
+                js_realloc: Some(Self::realloc::<A>),
+                js_malloc_usable_size: Some(Self::malloc_usable_size::<A>),
+            }
+        }
+        // The original QuickJS uses a different allocator ABI: callbacks receive
+        // a `*mut JSMallocState` (whose `opaque` field carries the user
+        // pointer), there is no `calloc`, and no `usable_size` hook.
+        #[cfg(feature = "quickjs-og")]
+        {
+            qjs::JSMallocFunctions {
+                js_malloc: Some(Self::malloc_orig::<A>),
+                js_free: Some(Self::free_orig::<A>),
+                js_realloc: Some(Self::realloc_orig::<A>),
+                js_malloc_usable_size: Some(Self::malloc_usable_size::<A>),
+            }
         }
     }
 
@@ -89,6 +104,7 @@ impl AllocatorHolder {
         self.0
     }
 
+    #[cfg(not(feature = "quickjs-og"))]
     unsafe extern "C" fn calloc<A>(
         opaque: *mut qjs::c_void,
         count: qjs::size_t,
@@ -103,6 +119,7 @@ impl AllocatorHolder {
         allocator.calloc(rust_count, rust_size) as *mut qjs::c_void
     }
 
+    #[cfg(not(feature = "quickjs-og"))]
     unsafe extern "C" fn malloc<A>(opaque: *mut qjs::c_void, size: qjs::size_t) -> *mut qjs::c_void
     where
         A: Allocator,
@@ -112,6 +129,7 @@ impl AllocatorHolder {
         allocator.alloc(rust_size) as *mut qjs::c_void
     }
 
+    #[cfg(not(feature = "quickjs-og"))]
     unsafe extern "C" fn free<A>(opaque: *mut qjs::c_void, ptr: *mut qjs::c_void)
     where
         A: Allocator,
@@ -126,6 +144,7 @@ impl AllocatorHolder {
         allocator.dealloc(ptr as _);
     }
 
+    #[cfg(not(feature = "quickjs-og"))]
     unsafe extern "C" fn realloc<A>(
         opaque: *mut qjs::c_void,
         ptr: *mut qjs::c_void,
@@ -139,6 +158,7 @@ impl AllocatorHolder {
         allocator.realloc(ptr as _, rust_size) as *mut qjs::c_void
     }
 
+    // `malloc_usable_size` has the same signature in both flavors.
     unsafe extern "C" fn malloc_usable_size<A>(ptr: *const qjs::c_void) -> qjs::size_t
     where
         A: Allocator,
@@ -148,5 +168,50 @@ impl AllocatorHolder {
             return 0;
         }
         A::usable_size(ptr as _).try_into().unwrap()
+    }
+
+    // ---- original-flavor allocator callbacks ----
+    //
+    // The original QuickJS passes a `*mut JSMallocState` whose `opaque` field
+    // holds the user pointer set via `JS_NewRuntime2`.
+
+    #[cfg(feature = "quickjs-og")]
+    unsafe extern "C" fn malloc_orig<A>(
+        s: *mut qjs::JSMallocState,
+        size: qjs::size_t,
+    ) -> *mut qjs::c_void
+    where
+        A: Allocator,
+    {
+        let allocator = &mut *((*s).opaque as *mut DynAllocator);
+        let rust_size: usize = size.try_into().expect(qjs::SIZE_T_ERROR);
+        allocator.alloc(rust_size) as *mut qjs::c_void
+    }
+
+    #[cfg(feature = "quickjs-og")]
+    unsafe extern "C" fn free_orig<A>(s: *mut qjs::JSMallocState, ptr: *mut qjs::c_void)
+    where
+        A: Allocator,
+    {
+        // simulate the default behavior of libc::free
+        if ptr.is_null() {
+            return;
+        }
+        let allocator = &mut *((*s).opaque as *mut DynAllocator);
+        allocator.dealloc(ptr as _);
+    }
+
+    #[cfg(feature = "quickjs-og")]
+    unsafe extern "C" fn realloc_orig<A>(
+        s: *mut qjs::JSMallocState,
+        ptr: *mut qjs::c_void,
+        size: qjs::size_t,
+    ) -> *mut qjs::c_void
+    where
+        A: Allocator,
+    {
+        let rust_size: usize = size.try_into().expect(qjs::SIZE_T_ERROR);
+        let allocator = &mut *((*s).opaque as *mut DynAllocator);
+        allocator.realloc(ptr as _, rust_size) as *mut qjs::c_void
     }
 }

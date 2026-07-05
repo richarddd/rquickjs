@@ -205,6 +205,9 @@ impl<'js> Opaque<'js> {
         unsafe { (*self.promise_hook.get()) = promise_hook }
     }
 
+    // Only invoked from the promise-hook callback, which is quickjs-ng-only
+    // (the original QuickJS has no `JS_SetPromiseHook`).
+    #[cfg_attr(feature = "quickjs-og", allow(dead_code))]
     pub fn run_promise_hook<'a>(
         &self,
         ctx: Ctx<'a>,

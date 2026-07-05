@@ -7,4 +7,10 @@ publish = false
 
 [dependencies.rquickjs]
 path = "../.."
-features = ["macro"]
+default-features = false
+features = ["std", "macro"]
+
+[features]
+default = ["quickjs-ng"]
+quickjs-ng = ["rquickjs/quickjs-ng"]
+quickjs-og = ["rquickjs/quickjs-og", "rquickjs/bindgen"]
