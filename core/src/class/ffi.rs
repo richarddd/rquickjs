@@ -455,7 +455,14 @@ impl VTable {
                     }
                     for (i, name) in names.into_iter().enumerate() {
                         let entry = tab.add(i);
-                        (*entry).is_enumerable = name.is_enumerable;
+                        #[cfg(feature = "quickjs-og")]
+                        {
+                            (*entry).is_enumerable = name.is_enumerable as ::core::ffi::c_int;
+                        }
+                        #[cfg(not(feature = "quickjs-og"))]
+                        {
+                            (*entry).is_enumerable = name.is_enumerable;
+                        }
                         // Dup the atom for QuickJS ownership; Rust Atom drop will free the original
                         (*entry).atom = qjs::JS_DupAtom(ctx.as_ptr(), name.atom.atom);
                     }

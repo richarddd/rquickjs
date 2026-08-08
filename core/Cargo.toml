@@ -36,14 +36,20 @@ tokio = { version = "1", default-features = false, features = [
   "macros",
   "sync",
 ] }
-rquickjs.path = "../"
+rquickjs = { path = "../", default-features = false, features = ["std"] }
 approx = "0.5"
 trybuild = "1"
 
 [features]
-default = ["std"]
+default = ["std", "quickjs-ng"]
 
 std = ["relative-path?/std"]
+
+# Select which QuickJS C flavor to build against (mutually exclusive).
+# `quickjs-ng` (default) builds the quickjs-ng fork; `quickjs-og` builds
+# Fabrice Bellard's original QuickJS. The latter requires `bindgen`.
+quickjs-ng = ["rquickjs-sys/quickjs-ng", "rquickjs/quickjs-ng"]
+quickjs-og = ["rquickjs-sys/quickjs-og", "rquickjs/quickjs-og"]
 
 # Almost all features excluding "parallel" and support for async runtimes
 full = ["std", "chrono", "loader", "dyn-load", "either", "indexmap", "half"]

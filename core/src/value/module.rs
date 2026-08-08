@@ -194,11 +194,49 @@ pub struct Declared;
 pub struct Evaluated;
 
 /// A JavaScript module.
-#[derive(Clone, Debug)]
+///
+/// # Reference counting
+///
+/// A `Module` owns exactly one reference count on the underlying `JSModuleDef`.
+/// `Clone` duplicates that reference and `Drop` releases it.
+///
+/// In quickjs-ng modules are not reference-counted-and-freed the way ordinary
+/// values are (`JS_FreeValue` on a module aborts there); modules are owned by
+/// the runtime and reconciled at teardown. Releasing the reference on drop is
+/// therefore only necessary — and only sound — for the `quickjs-og`
+/// flavor, whose GC treats a module like any other ref-counted object. Under
+/// quickjs-ng both `Clone` and `Drop` are no-ops with respect to the module
+/// reference, matching the engine's ownership model.
+#[derive(Debug)]
 pub struct Module<'js, T = Declared> {
     ptr: NonNull<qjs::JSModuleDef>,
     ctx: Ctx<'js>,
     _type_marker: PhantomData<T>,
+}
+
+impl<'js, T> Clone for Module<'js, T> {
+    fn clone(&self) -> Self {
+        #[cfg(feature = "quickjs-og")]
+        unsafe {
+            let v = qjs::JS_MKPTR(qjs::JS_TAG_MODULE, self.ptr.as_ptr().cast());
+            qjs::JS_DupValue(self.ctx.as_ptr(), v);
+        }
+        Module {
+            ptr: self.ptr,
+            ctx: self.ctx.clone(),
+            _type_marker: PhantomData,
+        }
+    }
+}
+
+impl<'js, T> Drop for Module<'js, T> {
+    fn drop(&mut self) {
+        #[cfg(feature = "quickjs-og")]
+        unsafe {
+            let v = qjs::JS_MKPTR(qjs::JS_TAG_MODULE, self.ptr.as_ptr().cast());
+            qjs::JS_FreeValue(self.ctx.as_ptr(), v);
+        }
+    }
 }
 
 impl<'js, T> Module<'js, T> {
@@ -206,7 +244,37 @@ impl<'js, T> Module<'js, T> {
         self.ptr.as_ptr()
     }
 
+    /// Wrap a module pointer, taking ownership of one existing reference count.
+    ///
+    /// # Safety
+    /// The caller must transfer ownership of exactly one reference count on
+    /// `ptr` to the returned `Module` (which releases it on drop).
     pub(crate) unsafe fn from_ptr(ctx: Ctx<'js>, ptr: NonNull<qjs::JSModuleDef>) -> Module<'js, T> {
+        Module {
+            ptr,
+            ctx,
+            _type_marker: PhantomData,
+        }
+    }
+
+    /// Wrap a runtime-owned module pointer (e.g. one created via
+    /// `JS_NewCModule`, which only holds the `loaded_modules` reference),
+    /// duplicating the reference so the returned `Module` owns exactly one.
+    ///
+    /// This preserves the invariant that every `Module` releases one reference
+    /// on drop.
+    ///
+    /// # Safety
+    /// `ptr` must point to a live module associated with `ctx`.
+    pub(crate) unsafe fn from_ptr_dup(
+        ctx: Ctx<'js>,
+        ptr: NonNull<qjs::JSModuleDef>,
+    ) -> Module<'js, T> {
+        #[cfg(feature = "quickjs-og")]
+        {
+            let v = qjs::JS_MKPTR(qjs::JS_TAG_MODULE, ptr.as_ptr().cast());
+            qjs::JS_DupValue(ctx.as_ptr(), v);
+        }
         Module {
             ptr,
             ctx,
@@ -224,7 +292,9 @@ impl<'js, T> Module<'js, T> {
         let ctx = Ctx::from_ptr(ctx);
         // Should never be null
         let ptr = NonNull::new(ptr).unwrap();
-        let module = unsafe { Module::from_ptr(ctx.clone(), ptr) };
+        // The engine owns this module; take our own reference via `from_ptr_dup`
+        // so the `Module`/`Exports` drop balances correctly.
+        let module = unsafe { Module::from_ptr_dup(ctx.clone(), ptr) };
         let exports = Exports(module);
         match D::evaluate(&ctx, &exports) {
             Ok(_) => 0,
@@ -287,7 +357,7 @@ impl<'js> Module<'js, Declared> {
         let ptr =
             unsafe { qjs::JS_NewCModule(ctx.as_ptr(), name.as_ptr(), Some(Self::eval_fn::<D>)) };
         let ptr = NonNull::new(ptr).ok_or(Error::Unknown)?;
-        let m = unsafe { Module::from_ptr(ctx, ptr) };
+        let m = unsafe { Module::from_ptr_dup(ctx, ptr) };
 
         let decl = Declarations(m);
         D::declare(&decl)?;
@@ -368,7 +438,9 @@ impl<'js> Module<'js, Declared> {
         let name = CString::new(name)?;
         let ptr = (load_fn)(ctx.as_ptr(), name.as_ptr().cast());
         let ptr = NonNull::new(ptr).ok_or(Error::Exception)?;
-        unsafe { Ok(Module::from_ptr(ctx, ptr)) }
+        // `load_fn` returns a runtime-owned (JS_NewCModule) module; take our own
+        // reference so the handle can release it on drop.
+        unsafe { Ok(Module::from_ptr_dup(ctx, ptr)) }
     }
 
     /// Evaluate the module.
@@ -380,17 +452,25 @@ impl<'js> Module<'js, Declared> {
             #[cfg(feature = "parallel")]
             qjs::JS_UpdateStackTop(qjs::JS_GetRuntime(self.ctx.as_ptr()));
 
-            // JS_EvalFunction `free's` the module so we should dup first
+            // `JS_EvalFunction` consumes one reference on the module, so dup
+            // first to keep the reference this handle owns intact.
             let v = qjs::JS_MKPTR(qjs::JS_TAG_MODULE, self.ptr.as_ptr().cast());
             qjs::JS_DupValue(self.ctx.as_ptr(), v);
             qjs::JS_EvalFunction(self.ctx.as_ptr(), v)
         };
         let ret = unsafe { self.ctx.handle_exception(ret)? };
         let promise = unsafe { Promise::from_js_value(self.ctx.clone(), ret) };
+
+        // Transfer this handle's owned reference to the returned `Evaluated`
+        // module without running `self`'s drop (which would release it) and
+        // without leaking `self`'s `Ctx`. Move the fields out by value.
+        let this = core::mem::ManuallyDrop::new(self);
+        let ptr = this.ptr;
+        let ctx = unsafe { core::ptr::read(&this.ctx) };
         Ok((
             Module {
-                ptr: self.ptr,
-                ctx: self.ctx,
+                ptr,
+                ctx,
                 _type_marker: PhantomData,
             },
             promise,
@@ -520,9 +600,14 @@ impl<'js, Evaluated> Module<'js, Evaluated> {
     ///
     /// This is always safe to do since calling eval again on an already evaluated module is safe.
     pub fn into_declared(self) -> Module<'js, Declared> {
+        // Transfer the owned reference to the returned handle without running
+        // `self`'s drop and without leaking `self`'s `Ctx`.
+        let this = core::mem::ManuallyDrop::new(self);
+        let ptr = this.ptr;
+        let ctx = unsafe { core::ptr::read(&this.ctx) };
         Module {
-            ptr: self.ptr,
-            ctx: self.ctx,
+            ptr,
+            ctx,
             _type_marker: PhantomData,
         }
     }

@@ -356,7 +356,14 @@ impl<'js> Value<'js> {
     /// Check if the value is an array
     #[inline]
     pub fn is_array(&self) -> bool {
-        unsafe { qjs::JS_IsArray(self.value) }
+        #[cfg(feature = "quickjs-og")]
+        unsafe {
+            qjs::JS_IsArray(self.ctx.as_ptr(), self.value)
+        }
+        #[cfg(not(feature = "quickjs-og"))]
+        unsafe {
+            qjs::JS_IsArray(self.value)
+        }
     }
 
     /// Check if the value is a function
@@ -374,7 +381,17 @@ impl<'js> Value<'js> {
     /// Check if the value is a promise.
     #[inline]
     pub fn is_promise(&self) -> bool {
-        unsafe { qjs::JS_PromiseState(self.ctx.as_ptr(), self.value) >= 0 }
+        // A promise's state is PENDING/FULFILLED/REJECTED (0/1/2); non-promises
+        // return NOT_A_PROMISE (-1). We test against the valid states rather
+        // than `>= 0` because bindgen may generate `JSPromiseStateEnum` as an
+        // unsigned type (notably for the `quickjs-og` flavor), which would
+        // make `>= 0` always true and misclassify every value as a promise.
+        unsafe {
+            let state = qjs::JS_PromiseState(self.ctx.as_ptr(), self.value);
+            state == qjs::JSPromiseStateEnum_JS_PROMISE_PENDING
+                || state == qjs::JSPromiseStateEnum_JS_PROMISE_FULFILLED
+                || state == qjs::JSPromiseStateEnum_JS_PROMISE_REJECTED
+        }
     }
 
     /// Check if the value is an exception
@@ -386,13 +403,27 @@ impl<'js> Value<'js> {
     /// Check if the value is an error
     #[inline]
     pub fn is_error(&self) -> bool {
-        unsafe { qjs::JS_IsError(self.value) }
+        #[cfg(feature = "quickjs-og")]
+        unsafe {
+            qjs::JS_IsError(self.ctx.as_ptr(), self.value)
+        }
+        #[cfg(not(feature = "quickjs-og"))]
+        unsafe {
+            qjs::JS_IsError(self.value)
+        }
     }
 
     /// Check if the value is an uncatchable error (e.g. from an interrupt handler)
     #[inline]
     pub fn is_uncatchable_error(&self) -> bool {
-        unsafe { qjs::JS_IsUncatchableError(self.value) }
+        #[cfg(feature = "quickjs-og")]
+        unsafe {
+            qjs::JS_IsUncatchableError(self.ctx.as_ptr(), self.value)
+        }
+        #[cfg(not(feature = "quickjs-og"))]
+        unsafe {
+            qjs::JS_IsUncatchableError(self.value)
+        }
     }
 
     /// Check if the value is a BigInt
@@ -404,7 +435,14 @@ impl<'js> Value<'js> {
     /// Check if the value is a proxy
     #[inline]
     pub fn is_proxy(&self) -> bool {
-        unsafe { qjs::JS_IsProxy(self.value) }
+        #[cfg(feature = "quickjs-og")]
+        unsafe {
+            qjs::JS_IsProxy(self.ctx.as_ptr(), self.value)
+        }
+        #[cfg(not(feature = "quickjs-og"))]
+        unsafe {
+            qjs::JS_IsProxy(self.value)
+        }
     }
 
     /// Reference as value
@@ -839,6 +877,13 @@ mod test {
     // `Err(Error::Exception)` rather than returning a `Value` that wraps a
     // `JS_EXCEPTION` sentinel.
     #[test]
+    #[cfg_attr(
+        feature = "quickjs-og",
+        ignore = "on 64-bit targets the original stores i64::MAX as an inline short \
+                  big-int (JS_SHORT_BIG_INT_BITS = 64), so no heap allocation occurs \
+                  and there is no failure to report; quickjs-ng uses 32-bit short \
+                  big-ints and heap-allocates"
+    )]
     fn big_int_oom_is_reported() {
         let rt = crate::Runtime::new().unwrap();
         let ctx = crate::Context::full(&rt).unwrap();

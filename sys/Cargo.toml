@@ -23,6 +23,16 @@ version = "0.5"
 optional = true
 
 [features]
+default = ["quickjs-ng"]
+
+# Select which QuickJS C flavor to build against.
+# These are mutually exclusive; exactly one must be enabled.
+#
+# `quickjs-ng` builds the quickjs-ng fork (sys/quickjs submodule).
+# `quickjs-og` builds Fabrice Bellard's original QuickJS (sys/quickjs-original submodule).
+quickjs-ng = []
+quickjs-og = []
+
 bindgen = ["bindgen-rs"]
 
 # Debug logging

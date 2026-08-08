@@ -61,8 +61,34 @@ jobs:
         with:
           toolchain: nightly
           components: clippy
-      - name: Cargo clippy
+      - name: Cargo clippy (quickjs-ng)
         run: cargo clippy --all --all-targets --features full-async,bindgen
+      - name: Cargo clippy (quickjs-og)
+        run: cargo clippy --all --all-targets --no-default-features --features full-async,bindgen,quickjs-og
+
+  # Run the full workspace test suite against both QuickJS C flavors in
+  # parallel. The original flavor requires `bindgen` (no bundled bindings are
+  # shipped for it) and is selected with `--no-default-features` so the default
+  # `quickjs-ng` is not also pulled in.
+  flavor:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [quickjs-ng, quickjs-og]
+    name: flavor / ${{ matrix.flavor }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Cargo test (${{ matrix.flavor }})
+        # The original QuickJS uses C assertions during runtime teardown; run
+        # single-threaded so a deliberate abort in one test cannot interleave
+        # with another.
+        run: cargo test --workspace --no-default-features --features full-async,bindgen,${{ matrix.flavor }} -- --test-threads=1
 
   msrv:
     # Check to see if rquickjs builds on minimal supported Rust version.
@@ -102,7 +128,7 @@ jobs:
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
       - name: cargo llvm-cov
-        run: cargo llvm-cov --locked --no-default-features --features full-async,compile-tests,bindgen --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --no-default-features --features full-async,compile-tests,bindgen,quickjs-ng --workspace --lcov --output-path lcov.info
       - name: Record Rust version
         run: echo "RUST=$(rustc --version)" >> "$GITHUB_ENV"
       - name: Upload to codecov.io
@@ -128,11 +154,11 @@ jobs:
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
       - name: Run tests with address sanitizer
-        run: CC=clang RUSTFLAGS=-Zsanitizer=address cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
+        run: CC=clang RUSTFLAGS=-Zsanitizer=address cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen,quickjs-ng
       - name: Run tests with thread sanitizer
-        run: CC=clang RUSTFLAGS=-Zsanitizer=thread cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
+        run: CC=clang RUSTFLAGS=-Zsanitizer=thread cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen,quickjs-ng
       - name: Run tests with memory sanitizer
-        run: CC=clang RUSTFLAGS=-Zsanitizer=memory cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen
+        run: CC=clang RUSTFLAGS=-Zsanitizer=memory cargo test --tests --workspace -Zbuild-std --target x86_64-unknown-linux-gnu --locked --no-default-features --features full-async,bindgen,quickjs-ng
 
   examples:
     runs-on: ubuntu-latest
@@ -153,6 +179,7 @@ jobs:
       - format
       - doc
       - check
+      - flavor
       - msrv
       - coverage
     strategy:
@@ -531,7 +558,7 @@ jobs:
           BUILD_TARGET: ${{ matrix.target }}
           TARGET: ${{ matrix.target }}
         run: |
-          cargo build ${{ matrix.optimization && '--release' || '' }} --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+          cargo build ${{ matrix.optimization && '--release' || '' }} --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }},quickjs-ng
       - name: Test
         if: ${{ !matrix.no-build && !matrix.no-test }}
         timeout-minutes: 12
@@ -541,7 +568,7 @@ jobs:
           # Limit test threads to 1 for QEMU-emulated targets to work around an intermittent
           # QEMU user-mode emulation bug: "QEMU internal SIGSEGV {code=MAPERR, addr=0x20}"
           # This is a race condition in QEMU's thread emulation, not a bug in rquickjs.
-          ${{ (startsWith(matrix.target, 'loongarch64') || startsWith(matrix.target, 'riscv64') || startsWith(matrix.target, 'aarch64-unknown-linux') || startsWith(matrix.target, 'armv7') || startsWith(matrix.target, 'powerpc64')) && 'RUST_TEST_THREADS=1' || '' }} ${{ matrix.target == 'wasm32-wasip1' && 'CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime' || '' }} ${{ matrix.target == 'wasm32-wasip2' && 'CARGO_TARGET_WASM32_WASIP2_RUNNER=wasmtime' || '' }} cargo test ${{ matrix.optimization && '--release' || '' }} --all ${{ (matrix.target == 'wasm32-wasip1' || matrix.target == 'wasm32-wasip2') && '--exclude module-loader' || ''  }} --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+          ${{ (startsWith(matrix.target, 'loongarch64') || startsWith(matrix.target, 'riscv64') || startsWith(matrix.target, 'aarch64-unknown-linux') || startsWith(matrix.target, 'armv7') || startsWith(matrix.target, 'powerpc64')) && 'RUST_TEST_THREADS=1' || '' }} ${{ matrix.target == 'wasm32-wasip1' && 'CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime' || '' }} ${{ matrix.target == 'wasm32-wasip2' && 'CARGO_TARGET_WASM32_WASIP2_RUNNER=wasmtime' || '' }} cargo test ${{ matrix.optimization && '--release' || '' }} --all ${{ (matrix.target == 'wasm32-wasip1' || matrix.target == 'wasm32-wasip2') && '--exclude module-loader' || ''  }} --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }},quickjs-ng
 
   update-bindings:
     if: ${{ github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/') }}

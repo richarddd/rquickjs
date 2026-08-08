@@ -132,14 +132,31 @@ impl LoaderHolder {
 
     pub(crate) fn set_to_runtime(&self, rt: *mut qjs::JSRuntime) {
         unsafe {
-            qjs::JS_SetModuleLoaderFunc2(
-                rt,
-                None,
-                Some(Self::load_raw),
-                None, // No attribute validation
-                self.0 as _,
-            );
-            qjs::JS_SetModuleNormalizeFunc2(rt, Some(Self::normalize_raw));
+            // quickjs-ng exposes a separate attributes-aware normalizer via
+            // `JS_SetModuleNormalizeFunc2`; the original QuickJS only has the
+            // v1 normalizer, passed as the second argument to
+            // `JS_SetModuleLoaderFunc2`.
+            #[cfg(not(feature = "quickjs-og"))]
+            {
+                qjs::JS_SetModuleLoaderFunc2(
+                    rt,
+                    None,
+                    Some(Self::load_raw),
+                    None, // No attribute validation
+                    self.0 as _,
+                );
+                qjs::JS_SetModuleNormalizeFunc2(rt, Some(Self::normalize_raw));
+            }
+            #[cfg(feature = "quickjs-og")]
+            {
+                qjs::JS_SetModuleLoaderFunc2(
+                    rt,
+                    Some(Self::normalize_raw_v1),
+                    Some(Self::load_raw),
+                    None, // No attribute validation
+                    self.0 as _,
+                );
+            }
         }
     }
 
@@ -170,6 +187,7 @@ impl LoaderHolder {
         Ok(unsafe { qjs::js_strndup(ctx.as_ptr(), name.as_ptr() as _, name.len() as _) })
     }
 
+    #[cfg(not(feature = "quickjs-og"))]
     unsafe extern "C" fn normalize_raw(
         ctx: *mut qjs::JSContext,
         base: *const qjs::c_char,
@@ -183,6 +201,27 @@ impl LoaderHolder {
         let loader = &mut *(opaque as *mut LoaderOpaque);
 
         Self::normalize(loader, &ctx, base, name, attributes).unwrap_or_else(|error| {
+            error.throw(&ctx);
+            ptr::null_mut()
+        })
+    }
+
+    /// v1 normalizer used by the `quickjs-og` flavor, which has no
+    /// attributes-aware normalizer. Import attributes are passed as
+    /// `JS_UNDEFINED`.
+    #[cfg(feature = "quickjs-og")]
+    unsafe extern "C" fn normalize_raw_v1(
+        ctx: *mut qjs::JSContext,
+        base: *const qjs::c_char,
+        name: *const qjs::c_char,
+        opaque: *mut qjs::c_void,
+    ) -> *mut qjs::c_char {
+        let ctx = Ctx::from_ptr(ctx);
+        let base = CStr::from_ptr(base);
+        let name = CStr::from_ptr(name);
+        let loader = &mut *(opaque as *mut LoaderOpaque);
+
+        Self::normalize(loader, &ctx, base, name, qjs::JS_UNDEFINED).unwrap_or_else(|error| {
             error.throw(&ctx);
             ptr::null_mut()
         })

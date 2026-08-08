@@ -15,6 +15,16 @@ impl ExoticMethodsHolder {
             has_property: Some(crate::class::ffi::exotic_has_property),
             set_property: Some(crate::class::ffi::exotic_set_property),
             get_property: Some(crate::class::ffi::exotic_get_property),
+            // The original QuickJS exposes additional prototype/extensibility
+            // hooks that quickjs-ng does not; leave them unset.
+            #[cfg(feature = "quickjs-og")]
+            get_prototype: None,
+            #[cfg(feature = "quickjs-og")]
+            set_prototype: None,
+            #[cfg(feature = "quickjs-og")]
+            is_extensible: None,
+            #[cfg(feature = "quickjs-og")]
+            prevent_extensions: None,
         })))
     }
 

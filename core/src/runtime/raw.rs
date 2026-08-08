@@ -2,6 +2,7 @@
 use alloc::{boxed::Box, ffi::CString};
 use core::{mem, panic::AssertUnwindSafe, ptr::NonNull, result::Result as StdResult};
 
+#[cfg(not(feature = "quickjs-og"))]
 use rquickjs_sys::JSPromiseHookType;
 
 use crate::allocator::{Allocator, AllocatorHolder};
@@ -291,6 +292,7 @@ impl RawRuntime {
     }
 
     #[allow(clippy::unnecessary_cast)]
+    #[cfg(not(feature = "quickjs-og"))]
     pub unsafe fn set_promise_hook(&mut self, hook: Option<PromiseHook>) {
         unsafe extern "C" fn promise_hook_wrapper(
             ctx: *mut rquickjs_sys::JSContext,
@@ -349,18 +351,36 @@ impl RawRuntime {
         self.get_opaque().set_promise_hook(hook);
     }
 
+    /// Promise hooks are a quickjs-ng feature; the original QuickJS does not
+    /// expose `JS_SetPromiseHook`, so this stores the hook without registering
+    /// a native callback (the hook will never fire).
+    #[cfg(feature = "quickjs-og")]
+    pub unsafe fn set_promise_hook(&mut self, hook: Option<PromiseHook>) {
+        self.get_opaque().set_promise_hook(hook);
+    }
+
     pub unsafe fn set_host_promise_rejection_tracker(&mut self, tracker: Option<RejectionTracker>) {
+        // The original QuickJS uses `int` for the `is_handled` flag, quickjs-ng
+        // uses `bool`.
+        #[cfg(feature = "quickjs-og")]
+        type IsHandled = ::core::ffi::c_int;
+        #[cfg(not(feature = "quickjs-og"))]
+        type IsHandled = bool;
+
         unsafe extern "C" fn rejection_tracker_wrapper(
             ctx: *mut rquickjs_sys::JSContext,
             promise: rquickjs_sys::JSValue,
             reason: rquickjs_sys::JSValue,
-            is_handled: bool,
+            is_handled: IsHandled,
             opaque: *mut ::core::ffi::c_void,
         ) {
             let opaque = NonNull::new_unchecked(opaque).cast::<Opaque>();
 
             let catch_unwind = crate::util::catch_unwind(AssertUnwindSafe(move || {
                 let ctx = Ctx::from_ptr(ctx);
+
+                #[cfg(feature = "quickjs-og")]
+                let is_handled = is_handled != 0;
 
                 opaque.as_ref().run_rejection_tracker(
                     ctx.clone(),

@@ -265,9 +265,9 @@ mod test {
 
     // Will be improved by https://github.com/quickjs-ng/quickjs/pull/406
     #[test]
-    #[should_panic(
-        expected = "Error: invalid first character of private name\n    at eval_script:1:1\n"
-    )]
+    // Both flavors raise the same SyntaxError; they differ only in the reported
+    // column (original `1:5` vs quickjs-ng `1:1`), so match on the message text.
+    #[should_panic(expected = "Error: invalid first character of private name")]
     fn exception() {
         test_with(|ctx| {
             let val = ctx.eval::<(), _>("bla?#@!@ ").catch(&ctx);

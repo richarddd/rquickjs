@@ -14,5 +14,7 @@ default-features = false
 features = ["futures", "rust-alloc", "std"]
 
 [features]
-default = ["macro"]
+default = ["macro", "quickjs-ng"]
 macro = ["rquickjs/macro"]
+quickjs-ng = ["rquickjs/quickjs-ng"]
+quickjs-og = ["rquickjs/quickjs-og", "rquickjs/bindgen"]
