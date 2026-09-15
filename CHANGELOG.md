@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+- Removed unused trait `StaticJsFunction`.
+
 ### Added
+
+- Added `Exception::throw_dom`, `PredefinedAtom::DOMException`, and `intrinsic::DOMException`.
 
 ### Changed
 
@@ -18,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 ### Fixed
+
+- Fixed `Params::is_constructor` to return the suggested value instead of `false`.
 
 ### Security
 
